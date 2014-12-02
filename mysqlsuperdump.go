@@ -17,6 +17,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"math/rand"
+	"time"
 )
 
 var (
@@ -26,6 +28,7 @@ var (
 	whereMap           = make(map[string]string, 0)
 	selectMap          = make(map[string]map[string]string, 0)
 	filterMap          = make(map[string]string, 0)
+	shuffleMap         = make(map[string]map[string]string, 0)
 	output             = flag.String("o", "", "Output path. Default is stdout")
 	verboseFlag        = flag.Bool("v", false, "Enable printing status information")
 	debugFlag          = flag.Bool("d", false, "Enable printing of debug information")
@@ -64,7 +67,7 @@ func main() {
 
 	parseCommandLine()
 	readConfigFile()
-
+	
 	verbose.Printf("> Using table locks: %t\n", useTableLock)
 
 	verbose.Printf("> Connecting to MySQL database at %s\n", dsn)
@@ -80,9 +83,12 @@ func main() {
 	}
 
 	fmt.Fprintf(w, "SET NAMES utf8;\n")
-	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 0;\n")
-
+	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 0;\n\n")
+	
+    rand.Seed(time.Now().UnixNano())
+	
 	verbose.Printf("> Getting table list...\n")
+	
 	tables := getTables(db)
 
 	for _, table := range tables {
@@ -159,6 +165,19 @@ func readConfigFile() {
 			selectMap[table] = make(map[string]string, 0)
 		}
 		selectMap[table][column], err = cfg.GetString("select", tablecol)
+		checkError(err)
+	}
+
+	shuffles, err := cfg.GetOptions("shuffle")
+	checkError(err)
+	for _, tablecol := range shuffles {
+		split := strings.Split(tablecol, ".")
+		table := split[0]
+		column := split[1]
+		if shuffleMap[table] == nil {
+			shuffleMap[table] = make(map[string]string, 0)
+		}
+		shuffleMap[table][column], err = cfg.GetString("shuffle", tablecol)
 		checkError(err)
 	}
 
@@ -286,7 +305,7 @@ func dumpTableData(w io.Writer, db *sql.DB, table string) {
 	checkError(err)
 	columns, err := rows.Columns()
 	checkError(err)
-
+	
 	values := make([]*sql.RawBytes, len(columns))
 	scanArgs := make([]interface{}, len(values))
 	for i := range values {
@@ -296,12 +315,18 @@ func dumpTableData(w io.Writer, db *sql.DB, table string) {
 	for rows.Next() {
 		err = rows.Scan(scanArgs...)
 		checkError(err)
-
+				
 		vals := make([]string, 0)
-		for _, col := range values {
+		for id, col := range values {
+			column_name := columns[id]
+			
 			val := "NULL"
 			if col != nil {
-				val = fmt.Sprintf("'%s'", escape(string(*col)))
+				if needsColumnShuffle(column_name, table) {					
+					val = fmt.Sprintf("'%s'", escape(shuffleString(string(*col))))
+				} else {
+					val = fmt.Sprintf("'%s'", escape(string(*col)))
+				}
 			}
 			vals = append(vals, val)
 		}
@@ -318,6 +343,54 @@ func dumpTableData(w io.Writer, db *sql.DB, table string) {
 	}
 
 	fmt.Fprintf(w, "\nUNLOCK TABLES;\n")
+}
+
+func needsColumnShuffle (column string, table string) bool {
+	if shuffleMap[table][column] == "string" {
+		return true
+	}
+	return false
+} 
+
+func shuffleEmail(str string) string {
+	e := strings.Split(str, "@")
+	user := e[0]
+	domain := strings.Split(e[1], ".")
+	
+	hostname := domain[0];
+	
+	ext := ""
+	if len(domain) > 1 {
+		ext = domain[1];
+	}
+	
+	user = shuffleString(user)
+	hostname = shuffleString(hostname)
+	
+    s := []string{user, "@", hostname, ".", ext};
+	
+	return strings.Join(s, ""); 
+}
+
+func shuffleString(str string) string {
+    emaili := strings.Index(str, "@")
+
+	if emaili > 0 {
+		return shuffleEmail(str)
+	}
+	
+	s := strings.Split(str, "")
+	
+    for i := range s {		
+       j := rand.Intn(i + 1)
+       s[i], s[j] = s[j], s[i]	   
+    }
+      
+	if emaili > 0 {
+		
+	}
+	  
+	return strings.Join(s, "");
 }
 
 func escape(str string) string {
@@ -340,6 +413,7 @@ func escape(str string) string {
 			esc = `\"`
 		case '\032':
 			esc = `\Z`
+			
 		default:
 			continue
 		}
@@ -350,3 +424,4 @@ func escape(str string) string {
 	io.WriteString(&buf, str[last:])
 	return buf.String()
 }
+
